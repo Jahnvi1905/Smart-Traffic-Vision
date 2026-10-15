@@ -1,0 +1,45 @@
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# IDE and system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Streamlit secrets (keep config templates if needed)
+.streamlit/secrets.toml
+.env
+.env.*
+
+# Generated output videos and temporary files
+data/output/*
+!data/output/.gitkeep
+data/input/*
+!data/input/.gitkeep
+data/violations/*
+!data/violations/.gitkeep
+
+# Local databases (may contain private records)
+*.db
+*.sqlite
+*.sqlite3
+
+# Training artifacts
+runs/
+datasets/
+
+# Model weights: exclude by default
+*.pt
+*.onnx
+*.engine
+*.weights
+
+# Include the models required by the application
+!models/
+!models/*.pt
