@@ -1,12 +1,14 @@
 import cv2
 import numpy as np
 
-# Target COCO classes for vehicles
+# Target classes for vehicles matching custom YOLO model
 DEFAULT_TARGET_CLASSES = {
-    2: "car",
-    3: "motorcycle",
-    5: "bus",
-    7: "truck"
+    0: "bus",
+    1: "car",
+    2: "three-wheeler",
+    3: "truck",
+    4: "two-wheeler",
+    5: "van"
 }
 
 # Colors for HUD and counts (BGR)
@@ -87,6 +89,9 @@ class VehicleCounter:
         self.class_counts = {name: 0 for name in self.target_classes.values()}
         self.counted_ids = set()
         self.prev_positions = {}  # track_id -> (cx, cy)
+        self.current_visible_count = 0
+        self.current_visible_classes = {name: 0 for name in self.target_classes.values()}
+        self.telemetry = []  # per-frame count telemetry for player synchronization
 
         # Fallback centroid tracker when box.id is None (ByteTrack disabled)
         self._fallback_next_id = 10001
@@ -97,12 +102,15 @@ class VehicleCounter:
         return sum(self.class_counts.values())
 
     def reset(self):
-        """Resets all counts and active tracks."""
+        """Resets all counts, telemetry, and active tracks."""
         self.class_counts = {name: 0 for name in self.target_classes.values()}
         self.counted_ids.clear()
         self.prev_positions.clear()
         self._fallback_tracks.clear()
         self._fallback_next_id = 10001
+        self.current_visible_count = 0
+        self.current_visible_classes = {name: 0 for name in self.target_classes.values()}
+        self.telemetry.clear()
 
     def adjust_line(self, frame_width: int, frame_height: int, line_pos_pct: float = None):
         """
@@ -164,19 +172,34 @@ class VehicleCounter:
         assigned_map = dict(assigned)
         return [assigned_map.get(i) for i in range(len(detections))]
 
-    def update(self, tracked_boxes) -> list:
+    def update(self, tracked_boxes, frame_idx: int = 0, timestamp_s: float = 0.0) -> list:
         """
         Updates the counter with current frame's detected/tracked boxes.
         Works seamlessly with ByteTrack IDs OR internal centroid tracker fallback.
+        Maintains both cumulative line crossings and currently visible vehicles.
+        Records per-frame telemetry for playback synchronization.
 
         Args:
             tracked_boxes: List of Ultralytics box objects or dicts with cls, conf, id, xyxy.
+            frame_idx: Optional frame index for telemetry synchronization.
+            timestamp_s: Optional video timestamp in seconds for telemetry.
 
         Returns:
             list: List of newly counted track IDs in this frame.
         """
         newly_counted = []
         if tracked_boxes is None or len(tracked_boxes) == 0:
+            self.current_visible_count = 0
+            self.current_visible_classes = {name: 0 for name in self.target_classes.values()}
+            self.telemetry.append({
+                "frame_idx": int(frame_idx),
+                "timestamp_s": round(float(timestamp_s), 3),
+                "cumulative_total": int(self.total_count),
+                "cumulative_classes": dict(self.class_counts),
+                "visible_total": 0,
+                "visible_classes": dict(self.current_visible_classes),
+                "newly_counted": []
+            })
             return newly_counted
 
         # Parse boxes
@@ -201,7 +224,23 @@ class VehicleCounter:
                 "bbox": (x1, y1, x2, y2)
             })
 
+        # Update currently visible vehicles on screen
+        self.current_visible_count = len(parsed)
+        self.current_visible_classes = {name: 0 for name in self.target_classes.values()}
+        for item in parsed:
+            cname = item["class_name"]
+            self.current_visible_classes[cname] = self.current_visible_classes.get(cname, 0) + 1
+
         if not parsed:
+            self.telemetry.append({
+                "frame_idx": int(frame_idx),
+                "timestamp_s": round(float(timestamp_s), 3),
+                "cumulative_total": int(self.total_count),
+                "cumulative_classes": dict(self.class_counts),
+                "visible_total": 0,
+                "visible_classes": dict(self.current_visible_classes),
+                "newly_counted": []
+            })
             return newly_counted
 
         # If ByteTrack IDs were not provided, use centroid association fallback
@@ -251,11 +290,27 @@ class VehicleCounter:
 
             self.prev_positions[track_id] = curr_center
 
+        # Record per-frame telemetry for downstream synchronization
+        self.telemetry.append({
+            "frame_idx": int(frame_idx),
+            "timestamp_s": round(float(timestamp_s), 3),
+            "cumulative_total": int(self.total_count),
+            "cumulative_classes": dict(self.class_counts),
+            "visible_total": int(self.current_visible_count),
+            "visible_classes": dict(self.current_visible_classes),
+            "newly_counted": list(newly_counted)
+        })
+
         return newly_counted
+
+    def get_telemetry(self) -> list:
+        """Returns the recorded frame-by-frame telemetry list."""
+        return self.telemetry
 
     def draw(self, frame):
         """
-        Renders the virtual counting line and a modern HUD dashboard with category counts.
+        Renders the virtual counting line and a clear, modern HUD dashboard.
+        Clearly separates cumulative line crossings from currently visible vehicles.
         """
         h, w = frame.shape[:2]
 
@@ -269,73 +324,101 @@ class VehicleCounter:
         mid_y = int((self.line_start[1] + self.line_end[1]) / 2) - 10
         cv2.putText(
             frame,
-            "--- COUNTING LINE ---",
-            (mid_x - 130, mid_y),
+            "--- VIRTUAL COUNTING LINE ---",
+            (mid_x - 140, mid_y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
+            0.58,
             (0, 240, 255),
             2,
             lineType=cv2.LINE_AA
         )
 
         # 2. Draw modern HUD Dashboard (top-left corner)
-        hud_w = 360
-        hud_h = max(210, 100 + len(self.class_counts) * 26)
+        hud_w = 380
+        hud_h = max(240, 125 + len(self.class_counts) * 26)
         hud_x, hud_y = 20, 20
 
         # Semi-transparent background
         overlay = frame.copy()
-        cv2.rectangle(overlay, (hud_x, hud_y), (hud_x + hud_w, hud_y + hud_h), (20, 24, 28), cv2.FILLED)
-        cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
+        cv2.rectangle(overlay, (hud_x, hud_y), (hud_x + hud_w, hud_y + hud_h), (16, 20, 26), cv2.FILLED)
+        cv2.addWeighted(overlay, 0.82, frame, 0.18, 0, frame)
 
         # Dashboard border & header accent
-        cv2.rectangle(frame, (hud_x, hud_y), (hud_x + hud_w, hud_y + hud_h), (80, 90, 100), 2)
-        cv2.rectangle(frame, (hud_x, hud_y), (hud_x + hud_w, hud_y + 40), (45, 55, 72), cv2.FILLED)
+        cv2.rectangle(frame, (hud_x, hud_y), (hud_x + hud_w, hud_y + hud_h), (70, 85, 105), 2)
+        cv2.rectangle(frame, (hud_x, hud_y), (hud_x + hud_w, hud_y + 38), (35, 48, 68), cv2.FILLED)
 
         # Header Title
         cv2.putText(
             frame,
-            "TRAFFIC MONITOR - VEHICLE COUNTS",
-            (hud_x + 15, hud_y + 26),
+            "SMART TRAFFIC VISION - HUD",
+            (hud_x + 14, hud_y + 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
+            (0, 230, 255),
+            2,
+            lineType=cv2.LINE_AA
+        )
+
+        # Summary Metrics: Cumulative Crossings vs In-Frame Visible
+        summary_text = f"Crossed: {self.total_count}  |  Visible: {self.current_visible_count}"
+        cv2.putText(
+            frame,
+            summary_text,
+            (hud_x + 14, hud_y + 66),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
             (255, 255, 255),
             2,
             lineType=cv2.LINE_AA
         )
 
-        # Total Count
-        total_text = f"Total Vehicles: {self.total_count}"
+        # Subtle divider
+        cv2.line(frame, (hud_x + 12, hud_y + 80), (hud_x + hud_w - 12, hud_y + 80), (60, 75, 95), 1)
+
+        # Subhead: Cumulative Crossings by Category
         cv2.putText(
             frame,
-            total_text,
-            (hud_x + 15, hud_y + 70),
+            "CUMULATIVE CROSSINGS (IN-FRAME ACTIVE):",
+            (hud_x + 14, hud_y + 98),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (255, 255, 255),
-            2,
+            0.42,
+            (160, 175, 195),
+            1,
             lineType=cv2.LINE_AA
         )
 
         # Category Counts
-        y_offset = hud_y + 105
+        y_offset = hud_y + 122
         spacing = 26
         for class_name, count in self.class_counts.items():
             color = CLASS_COLORS.get(class_name, (200, 200, 200))
+            vis = self.current_visible_classes.get(class_name, 0)
             # Small color badge
-            cv2.circle(frame, (hud_x + 22, y_offset - 5), 5, color, cv2.FILLED)
-            # Text
-            stat_line = f"{class_name.capitalize():<12}: {count}"
+            cv2.circle(frame, (hud_x + 20, y_offset - 5), 5, color, cv2.FILLED)
+            # Text line with cumulative and active count
+            stat_line = f"{class_name.capitalize():<14}: {count}"
             cv2.putText(
                 frame,
                 stat_line,
-                (hud_x + 36, y_offset),
+                (hud_x + 32, y_offset),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
+                0.52,
                 color,
                 1,
                 lineType=cv2.LINE_AA
             )
+            # If vehicles are currently visible, show live indicator
+            if vis > 0:
+                cv2.putText(
+                    frame,
+                    f"[{vis} live]",
+                    (hud_x + 235, y_offset),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.46,
+                    (0, 255, 180),
+                    1,
+                    lineType=cv2.LINE_AA
+                )
             y_offset += spacing
 
         return frame

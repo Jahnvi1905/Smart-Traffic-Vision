@@ -533,26 +533,33 @@ def format_event_display(e: dict) -> dict:
     if raw_type == "COUNT":
         # Road counting events have no vehicle license plate
         plate_display = "—"
-        vehicle_type_display = "Traffic Stream (All Classes)"
+        vehicle_type_display = e.get("vehicle_class") or "Traffic Stream (All Classes)"
         confidence_display = "—"  # Stored float was threshold setting, not model confidence
 
-        # Parse count breakdown dictionary into readable text
+        # Parse count breakdown dictionary from count_details or fallback raw_plate
+        raw_counts = e.get("count_details") or raw_plate
         summary_items = []
-        if raw_plate.startswith("{") and raw_plate.endswith("}"):
+        if raw_counts and (raw_counts.startswith("{") or raw_counts.startswith("[")):
             try:
-                import ast
-                cnts = ast.literal_eval(raw_plate)
+                import json, ast
+                cnts = json.loads(raw_counts) if raw_counts.startswith("{") else ast.literal_eval(raw_counts)
                 if isinstance(cnts, dict):
-                    for c_name, c_cnt in cnts.items():
-                        if c_cnt > 0:
-                            clean_name = c_name.replace("-", " ").title()
-                            summary_items.append(f"{c_cnt} {clean_name}{'s' if c_cnt > 1 else ''}")
+                    classes_dict = cnts.get("classes", cnts) if isinstance(cnts.get("classes"), dict) else cnts
+                    for c_name, c_cnt in classes_dict.items():
+                        if c_name != "total" and int(c_cnt) > 0:
+                            clean_name = str(c_name).replace("-", " ").title()
+                            summary_items.append(f"{c_cnt} {clean_name}{'s' if int(c_cnt) > 1 else ''}")
             except Exception:
                 pass
 
+        t_count = e.get("total_count")
         if summary_items:
             flow_summary = ", ".join(summary_items)
-        elif "Total: 0" in raw_vclass or raw_plate == "{}":
+            if t_count is not None:
+                flow_summary = f"Total: {t_count} ({flow_summary})"
+        elif t_count is not None:
+            flow_summary = f"Total: {t_count} vehicles crossed line"
+        elif "Total: 0" in raw_vclass or raw_counts == "{}":
             flow_summary = "0 vehicles crossed line"
         elif raw_vclass:
             flow_summary = raw_vclass
@@ -1172,11 +1179,13 @@ elif page == "Analyze Traffic":
                 if counter:
                     db.insert_event(
                         event_type="COUNT",
-                        vehicle_class=f"Total: {total_counted}",
+                        vehicle_class="Traffic Stream",
                         confidence=conf_thresh,
-                        plate_text=str(dict(counter.class_counts)),
+                        plate_text=None,
                         evidence_path=out_path,
                         review_status="approved",
+                        count_details=dict(counter.class_counts),
+                        total_count=total_counted,
                     )
 
                 st.session_state.video_analysis_result = {

@@ -180,9 +180,11 @@ class VehicleDetector:
         limit_frames = min(total_video_frames, max_frames) if max_frames else total_video_frames
         print(f"[INFO] Resolution: {width}x{height} | FPS: {fps:.2f} | Frames to process: {limit_frames}")
 
-        # Automatically adjust counting line to the video's actual resolution
+        # Automatically adjust counting line and stop-line to the video's actual resolution
         if counter is not None:
             counter.adjust_line(width, height)
+        if violation_manager is not None and getattr(violation_manager, "red_light_detector", None) is not None:
+            violation_manager.red_light_detector.adjust_line(width, height)
 
         output_dir = os.path.dirname(output_path)
         if output_dir:
@@ -239,13 +241,21 @@ class VehicleDetector:
                         verbose=False
                     )
 
-                # Annotate detections and update counter (works with ByteTrack or fallback tracking)
-                if results and len(results) > 0:
-                    boxes = results[0].boxes
-                    if counter is not None:
-                        counter.update(boxes)
-                    if violation_manager is not None:
-                        violation_manager.process_frame(frame, boxes, self.target_classes, frame_idx=frame_idx)
+                # Annotate detections and update counter & violation manager with timestamps
+                boxes = results[0].boxes if (results and len(results) > 0) else []
+                current_time_s = float(frame_idx) / float(fps)
+
+                if counter is not None:
+                    counter.update(boxes, frame_idx=frame_idx, timestamp_s=current_time_s)
+                if violation_manager is not None:
+                    violation_manager.process_frame(
+                        frame,
+                        boxes,
+                        self.target_classes,
+                        frame_idx=frame_idx,
+                        timestamp_s=current_time_s
+                    )
+                if boxes is not None and len(boxes) > 0:
                     frame = self.draw_detections(frame, boxes)
 
                 # Draw counter HUD and line if active
